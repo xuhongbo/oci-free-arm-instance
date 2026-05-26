@@ -63,7 +63,7 @@ jobs:
           if [ -z "$AD_NAME" ]; then
             mapfile -t AD_NAMES < <(oci iam availability-domain list \
               --compartment-id "$COMPARTMENT_ID" \
-              --output json | python -c 'import json, sys; print("\\n".join(ad["name"] for ad in json.load(sys.stdin)["data"]))')
+              --output json | python -c 'import json, sys; print("\n".join(ad["name"] for ad in json.load(sys.stdin)["data"]))')
           else
             AD_NAMES=("$AD_NAME")
           fi
