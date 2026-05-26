@@ -41,6 +41,8 @@ jobs:
         run: |
           set -euo pipefail
 
+          export SUPPRESS_LABEL_WARNING=True
+
           python -m pip install --user oci-cli
 
           mkdir -p ~/.oci
@@ -101,6 +103,9 @@ jobs:
             echo "$OCI_OUTPUT"
             echo "EOF"
           } >> "$GITHUB_OUTPUT"
+
+          echo "OCI launch output:"
+          echo "$OCI_OUTPUT"
 
           if echo "$OCI_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
             echo "Success! 'PROVISIONING' state found in output."
