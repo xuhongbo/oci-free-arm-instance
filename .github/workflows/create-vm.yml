@@ -26,6 +26,7 @@ env:
 jobs:
   build-and-deploy:
     runs-on: ubuntu-latest
+    timeout-minutes: 12
     steps:
       - name: Cache pip packages
         uses: actions/cache@v4
@@ -89,7 +90,7 @@ jobs:
           OCI_OUTPUT=""
           for AD in "${AD_NAMES[@]}"; do
             echo "Trying availability domain: $AD"
-            ATTEMPT_OUTPUT=$(oci compute instance launch \
+            ATTEMPT_OUTPUT=$(timeout 120s oci compute instance launch \
               --compartment-id "$COMPARTMENT_ID" \
               --availability-domain "$AD" \
               --shape "VM.Standard.A1.Flex" \
