@@ -21,6 +21,7 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
 jobs:
   build-and-deploy:
@@ -110,10 +111,10 @@ jobs:
           exit 1
 
       - name: Send Discord Notification
-        if: always()
+        if: always() && env.DISCORD_WEBHOOK_URL != ''
         uses: sarisia/actions-status-discord@v1.15.4
         with:
-          webhook: ${{ secrets.DISCORD_WEBHOOK_URL }}
+          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
           title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
           status: ${{ steps.create_vm.outcome }}
           color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
