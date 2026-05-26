@@ -8,6 +8,7 @@ on:
 permissions:
   actions: write
   contents: read
+  issues: write
 
 concurrency:
   group: oci-free-arm-instance
@@ -21,7 +22,6 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
-  DISCORD_WEBHOOK_URL: ${{ secrets.DISCORD_WEBHOOK_URL }}
 
 jobs:
   build-and-deploy:
@@ -127,17 +127,25 @@ jobs:
           echo "Error: Success string not found in OCI output. Failing the step."
           exit 1
 
-      - name: Send Discord Notification
-        if: always() && env.DISCORD_WEBHOOK_URL != ''
-        uses: sarisia/actions-status-discord@v1.15.4
-        with:
-          webhook: ${{ env.DISCORD_WEBHOOK_URL }}
-          title: "OCI VM Status: ${{ steps.create_vm.outcome }}"
-          status: ${{ steps.create_vm.outcome }}
-          color: ${{ steps.create_vm.outcome == 'success' && '0x28a745' || '0xdc3545' }}
-          description: |
-            Attempt to create A1.Flex VM.
-            Status: ${{ steps.create_vm.outcome }}
+      - name: Create success issue
+        if: steps.create_vm.outcome == 'success'
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          cat > /tmp/oci-success-issue.md <<EOF
+          @xuhongbo OCI A1.Flex instance created successfully.
+
+          Shape: VM.Standard.A1.Flex
+          Resources: 4 OCPU, 24 GB memory, 200 GB boot volume
+          Region: ${OCI_CLI_REGION:-us-phoenix-1}
+
+          Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          EOF
+
+          gh issue create \
+            --title "OCI VM created successfully" \
+            --body-file /tmp/oci-success-issue.md \
+            --assignee xuhongbo
 
       - name: Disable workflow after success
         if: steps.create_vm.outcome == 'success'
