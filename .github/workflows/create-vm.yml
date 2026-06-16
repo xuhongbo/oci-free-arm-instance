@@ -28,11 +28,16 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
-      - name: Cache pip packages
-        uses: actions/cache@v4
+      - name: Restore OCI CLI cache
+        id: oci_cli_cache
+        uses: actions/cache/restore@v4
         with:
-          path: ~/.local
-          key: ${{ runner.os }}-pip-oci-cli-v1
+          path: |
+            ~/.local
+            ~/.cache/pip
+          key: ${{ runner.os }}-pip-oci-cli-v2
+          restore-keys: |
+            ${{ runner.os }}-pip-oci-cli-
 
       - name: Add OCI CLI to path
         run: echo "$HOME/.local/bin" >> "$GITHUB_PATH"
@@ -156,6 +161,16 @@ jobs:
 
           echo "Error: Success string not found in OCI output. Failing the step."
           exit 1
+
+      - name: Save OCI CLI cache
+        if: always() && steps.oci_cli_cache.outputs.cache-hit != 'true'
+        uses: actions/cache/save@v4
+        continue-on-error: true
+        with:
+          path: |
+            ~/.local
+            ~/.cache/pip
+          key: ${{ steps.oci_cli_cache.outputs.cache-primary-key }}
 
       - name: Create success issue
         if: steps.create_vm.outcome == 'success'
