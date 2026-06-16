@@ -42,8 +42,14 @@ jobs:
         run: |
           set -euo pipefail
           export SUPPRESS_LABEL_WARNING=True
+          export PIP_DISABLE_PIP_VERSION_CHECK=1
 
-          python -m pip install --user oci-cli
+          if command -v oci >/dev/null 2>&1; then
+            echo "Using cached OCI CLI: $(oci --version)"
+          else
+            python -m pip install --user oci-cli
+            echo "Installed OCI CLI: $(oci --version)"
+          fi
 
           mkdir -p ~/.oci
           printf '%s\n' "${{ secrets.OCI_CLI_KEY_CONTENT }}" > ~/.oci/oci_api_key.pem
@@ -103,32 +109,43 @@ jobs:
           OCI_OUTPUT=""
           for AD in "${AD_NAMES[@]}"; do
             echo "Trying availability domain: $AD"
-            ATTEMPT_OUTPUT=$(timeout 120s oci compute instance launch \
-              --compartment-id "$COMPARTMENT_ID" \
-              --availability-domain "$AD" \
-              --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus":2,"memoryInGBs":12}' \
-              --subnet-id "$SUBNET_ID" \
-              --image-id "$IMAGE_ID" \
-              --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-              --assign-public-ip true \
-              --display-name "plane-vm" \
-              --boot-volume-size-in-gbs 100 2>&1 || true)
+            for LAUNCH_ATTEMPT in 1 2 3; do
+              echo "Launch attempt $LAUNCH_ATTEMPT for $AD"
+              ATTEMPT_OUTPUT=$(timeout 300s oci compute instance launch \
+                --compartment-id "$COMPARTMENT_ID" \
+                --availability-domain "$AD" \
+                --shape "VM.Standard.A1.Flex" \
+                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --subnet-id "$SUBNET_ID" \
+                --image-id "$IMAGE_ID" \
+                --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+                --assign-public-ip true \
+                --display-name "plane-vm" \
+                --boot-volume-size-in-gbs 100 2>&1 || true)
 
-            OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== $AD ====="$'\n'"${ATTEMPT_OUTPUT}"
+              OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== $AD attempt $LAUNCH_ATTEMPT ====="$'\n'"${ATTEMPT_OUTPUT}"
 
-            echo "OCI launch output for $AD:"
-            echo "$ATTEMPT_OUTPUT"
+              echo "OCI launch output for $AD attempt $LAUNCH_ATTEMPT:"
+              echo "$ATTEMPT_OUTPUT"
 
-            if echo "$ATTEMPT_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-              {
-                echo "log_data<<EOF"
-                echo "$OCI_OUTPUT"
-                echo "EOF"
-              } >> "$GITHUB_OUTPUT"
-              echo "Success! 'PROVISIONING' state found in output."
-              exit 0
-            fi
+              if echo "$ATTEMPT_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+                {
+                  echo "log_data<<EOF"
+                  echo "$OCI_OUTPUT"
+                  echo "EOF"
+                } >> "$GITHUB_OUTPUT"
+                echo "Success! 'PROVISIONING' state found in output."
+                exit 0
+              fi
+
+              if echo "$ATTEMPT_OUTPUT" | grep -Eiq 'RequestException|timed out|timeout|connection reset|temporarily unavailable'; then
+                echo "Transient OCI/network error detected; retrying this AD after 30 seconds."
+                sleep 30
+                continue
+              fi
+
+              break
+            done
           done
 
           {
