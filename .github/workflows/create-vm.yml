@@ -88,19 +88,7 @@ jobs:
           EXISTING_A1=$(oci compute instance list \
             --compartment-id "$COMPARTMENT_ID" \
             --all \
-            --output json | python -c '
-import json
-import sys
-instances = json.load(sys.stdin)["data"]
-matches = [
-    item for item in instances
-    if item.get("shape") == "VM.Standard.A1.Flex"
-    and item.get("lifecycle-state") != "TERMINATED"
-]
-if matches:
-    first = matches[0]
-    print(f"{first.get('display-name')} {first.get('lifecycle-state')} {first.get('id')}")
-')
+            --output json | python -c 'import json, sys; items=json.load(sys.stdin)["data"]; matches=[item for item in items if item.get("shape")=="VM.Standard.A1.Flex" and item.get("lifecycle-state")!="TERMINATED"]; print("{} {} {}".format(matches[0].get("display-name"), matches[0].get("lifecycle-state"), matches[0].get("id"))) if matches else None')
 
           if [ -n "$EXISTING_A1" ]; then
             echo "Existing A1 instance found: $EXISTING_A1"
