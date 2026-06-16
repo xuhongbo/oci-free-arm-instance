@@ -62,9 +62,7 @@ jobs:
 
           AD_NAME="${{ secrets.AD_NAME }}"
           if [ -z "$AD_NAME" ]; then
-            mapfile -t AD_NAMES < <(oci iam availability-domain list \
-              --compartment-id "$COMPARTMENT_ID" \
-              --output json | python -c 'import json, sys; print("\n".join(ad["name"] for ad in json.load(sys.stdin)["data"]))')
+            AD_NAMES=("MiSL:PHX-AD-3")
           else
             AD_NAMES=("$AD_NAME")
           fi
@@ -87,6 +85,33 @@ jobs:
             exit 1
           fi
 
+          EXISTING_A1=$(oci compute instance list \
+            --compartment-id "$COMPARTMENT_ID" \
+            --all \
+            --output json | python -c '
+import json
+import sys
+instances = json.load(sys.stdin)["data"]
+matches = [
+    item for item in instances
+    if item.get("shape") == "VM.Standard.A1.Flex"
+    and item.get("lifecycle-state") != "TERMINATED"
+]
+if matches:
+    first = matches[0]
+    print(f"{first.get('display-name')} {first.get('lifecycle-state')} {first.get('id')}")
+')
+
+          if [ -n "$EXISTING_A1" ]; then
+            echo "Existing A1 instance found: $EXISTING_A1"
+            {
+              echo "log_data<<EOF"
+              echo "Existing A1 instance found: $EXISTING_A1"
+              echo "EOF"
+            } >> "$GITHUB_OUTPUT"
+            exit 0
+          fi
+
           OCI_OUTPUT=""
           for AD in "${AD_NAMES[@]}"; do
             echo "Trying availability domain: $AD"
@@ -94,13 +119,13 @@ jobs:
               --compartment-id "$COMPARTMENT_ID" \
               --availability-domain "$AD" \
               --shape "VM.Standard.A1.Flex" \
-              --shape-config '{"ocpus":4,"memoryInGBs":24}' \
+              --shape-config '{"ocpus":2,"memoryInGBs":12}' \
               --subnet-id "$SUBNET_ID" \
               --image-id "$IMAGE_ID" \
               --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
               --assign-public-ip true \
-              --display-name "coolify-vm" \
-              --boot-volume-size-in-gbs 200 2>&1 || true)
+              --display-name "plane-vm" \
+              --boot-volume-size-in-gbs 100 2>&1 || true)
 
             OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== $AD ====="$'\n'"${ATTEMPT_OUTPUT}"
 
@@ -136,7 +161,7 @@ jobs:
           @xuhongbo OCI A1.Flex instance created successfully.
 
           Shape: VM.Standard.A1.Flex
-          Resources: 4 OCPU, 24 GB memory, 200 GB boot volume
+          Resources: 2 OCPU, 12 GB memory, 100 GB boot volume
           Region: ${OCI_CLI_REGION:-us-phoenix-1}
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
