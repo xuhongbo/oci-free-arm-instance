@@ -115,7 +115,7 @@ jobs:
                 --compartment-id "$COMPARTMENT_ID" \
                 --availability-domain "$AD" \
                 --shape "VM.Standard.A1.Flex" \
-                --shape-config '{"ocpus":2,"memoryInGBs":12}' \
+                --shape-config '{"ocpus":1,"memoryInGBs":6}' \
                 --subnet-id "$SUBNET_ID" \
                 --image-id "$IMAGE_ID" \
                 --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
@@ -166,7 +166,8 @@ jobs:
           @xuhongbo OCI A1.Flex instance created successfully.
 
           Shape: VM.Standard.A1.Flex
-          Resources: 2 OCPU, 12 GB memory, 100 GB boot volume
+          Resources: 1 OCPU, 6 GB memory, 100 GB boot volume
+          Next step: resize this A1.Flex instance to 2 OCPU and 12 GB memory after it is created.
           Region: ${OCI_CLI_REGION:-us-phoenix-1}
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
