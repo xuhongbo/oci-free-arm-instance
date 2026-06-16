@@ -72,12 +72,13 @@ jobs:
 
           printf '%s\n' "${{ secrets.SSH_PUBLIC_KEY }}" > /home/runner/my_ssh_key.pub
 
-          AD_NAME="${{ secrets.AD_NAME }}"
-          if [ -z "$AD_NAME" ]; then
-            AD_NAMES=("MiSL:PHX-AD-3")
+          AD_NAMES_SECRET="${{ secrets.AD_NAMES }}"
+          if [ -z "$AD_NAMES_SECRET" ]; then
+            AD_NAMES=("MiSL:PHX-AD-3" "MiSL:PHX-AD-1" "MiSL:PHX-AD-2")
           else
-            AD_NAMES=("$AD_NAME")
+            IFS=',' read -r -a AD_NAMES <<< "$AD_NAMES_SECRET"
           fi
+          echo "Availability domains to try: ${AD_NAMES[*]}"
 
           IMAGE_ID="${{ secrets.IMAGE_ID }}"
           if [ -z "$IMAGE_ID" ]; then
