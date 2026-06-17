@@ -22,6 +22,7 @@ env:
   OCI_CLI_TENANCY: ${{ secrets.OCI_CLI_TENANCY }}
   OCI_CLI_FINGERPRINT: ${{ secrets.OCI_CLI_FINGERPRINT }}
   OCI_CLI_KEY_CONTENT: ${{ secrets.OCI_CLI_KEY_CONTENT }}
+  PARALLEL_AD_JITTER_SECONDS: 6
   RETRY_DELAY_SECONDS: 60
 
 jobs:
@@ -122,23 +123,32 @@ jobs:
           fi
 
           OCI_OUTPUT=""
-          for SHAPE_CONFIG in "${SHAPE_CONFIGS[@]}"; do
-            IFS=':' read -r OCPUS MEMORY_GBS <<< "$SHAPE_CONFIG"
-            if [ -z "$OCPUS" ] || [ -z "$MEMORY_GBS" ]; then
-              echo "Invalid shape config: $SHAPE_CONFIG. Expected format OCPUS:MEMORY_GBS."
-              exit 1
-            fi
+          RUN_DIR=$(mktemp -d)
+          trap 'rm -rf "$RUN_DIR"' EXIT
 
-            echo "Trying shape config: ${OCPUS} OCPU / ${MEMORY_GBS} GB"
-            for AD in "${AD_NAMES[@]}"; do
-              echo "Trying availability domain: $AD"
-              for LAUNCH_ATTEMPT in 1 2 3; do
-                echo "Launch attempt $LAUNCH_ATTEMPT for $AD with ${OCPUS} OCPU / ${MEMORY_GBS} GB"
-                ATTEMPT_OUTPUT=$(timeout 300s oci compute instance launch \
+          launch_candidate() {
+            local shape_config="$1"
+            local ad="$2"
+            local output_file="$3"
+            local result_file="$4"
+            local ocpus memory_gbs delay launch_attempt attempt_output instance_id
+            IFS=':' read -r ocpus memory_gbs <<< "$shape_config"
+
+            {
+              delay=$((RANDOM % (PARALLEL_AD_JITTER_SECONDS + 1)))
+              if [ "$delay" -gt 0 ]; then
+                echo "Staggering launch by ${delay} seconds to avoid request bursts."
+                sleep "$delay"
+              fi
+
+              echo "Trying availability domain: $ad"
+              for launch_attempt in 1 2 3; do
+                echo "Launch attempt $launch_attempt for $ad with ${ocpus} OCPU / ${memory_gbs} GB"
+                attempt_output=$(timeout 300s oci compute instance launch \
                   --compartment-id "$COMPARTMENT_ID" \
-                  --availability-domain "$AD" \
+                  --availability-domain "$ad" \
                   --shape "VM.Standard.A1.Flex" \
-                  --shape-config "{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GBS}}" \
+                  --shape-config "{\"ocpus\":${ocpus},\"memoryInGBs\":${memory_gbs}}" \
                   --subnet-id "$SUBNET_ID" \
                   --image-id "$IMAGE_ID" \
                   --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
@@ -146,25 +156,23 @@ jobs:
                   --display-name "plane-vm" \
                   --boot-volume-size-in-gbs 100 2>&1 || true)
 
-                OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== ${OCPUS}C-${MEMORY_GBS}G $AD attempt $LAUNCH_ATTEMPT ====="$'\n'"${ATTEMPT_OUTPUT}"
+                echo "OCI launch output for $ad with ${ocpus} OCPU / ${memory_gbs} GB attempt $launch_attempt:"
+                echo "$attempt_output"
 
-                echo "OCI launch output for $AD with ${OCPUS} OCPU / ${MEMORY_GBS} GB attempt $LAUNCH_ATTEMPT:"
-                echo "$ATTEMPT_OUTPUT"
-
-                if echo "$ATTEMPT_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+                if echo "$attempt_output" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+                  instance_id=$(printf '%s\n' "$attempt_output" | python -c 'import json, sys; print(json.load(sys.stdin).get("data", {}).get("id", ""))' 2>/dev/null || true)
                   {
-                    echo "log_data<<EOF"
-                    echo "$OCI_OUTPUT"
-                    echo "EOF"
-                    echo "ocpus=$OCPUS"
-                    echo "memory_gbs=$MEMORY_GBS"
-                    echo "availability_domain=$AD"
-                  } >> "$GITHUB_OUTPUT"
+                    echo "status=success"
+                    echo "ocpus=$ocpus"
+                    echo "memory_gbs=$memory_gbs"
+                    echo "availability_domain=$ad"
+                    echo "instance_id=$instance_id"
+                  } > "$result_file"
                   echo "Success! 'PROVISIONING' state found in output."
                   exit 0
                 fi
 
-                if echo "$ATTEMPT_OUTPUT" | grep -Eiq 'RequestException|timed out|timeout|connection reset|temporarily unavailable'; then
+                if echo "$attempt_output" | grep -Eiq 'RequestException|timed out|timeout|connection reset|temporarily unavailable'; then
                   echo "Transient OCI/network error detected; retrying this AD and shape after 30 seconds."
                   sleep 30
                   continue
@@ -172,7 +180,72 @@ jobs:
 
                 break
               done
+
+              echo "status=failure" > "$result_file"
+              exit 1
+            } > "$output_file" 2>&1
+          }
+
+          for SHAPE_CONFIG in "${SHAPE_CONFIGS[@]}"; do
+            IFS=':' read -r OCPUS MEMORY_GBS <<< "$SHAPE_CONFIG"
+            if [ -z "$OCPUS" ] || [ -z "$MEMORY_GBS" ]; then
+              echo "Invalid shape config: $SHAPE_CONFIG. Expected format OCPUS:MEMORY_GBS."
+              exit 1
+            fi
+
+            echo "Trying shape config: ${OCPUS} OCPU / ${MEMORY_GBS} GB across ${#AD_NAMES[@]} availability domains in parallel"
+            PIDS=()
+            OUTPUT_FILES=()
+            RESULT_FILES=()
+            for AD in "${AD_NAMES[@]}"; do
+              SAFE_AD=$(printf '%s' "$AD" | tr -c '[:alnum:]_.-' '_')
+              OUTPUT_FILE="$RUN_DIR/${OCPUS}C_${MEMORY_GBS}G_${SAFE_AD}.log"
+              RESULT_FILE="$RUN_DIR/${OCPUS}C_${MEMORY_GBS}G_${SAFE_AD}.result"
+              launch_candidate "$SHAPE_CONFIG" "$AD" "$OUTPUT_FILE" "$RESULT_FILE" &
+              PIDS+=("$!")
+              OUTPUT_FILES+=("$OUTPUT_FILE")
+              RESULT_FILES+=("$RESULT_FILE")
             done
+
+            for PID in "${PIDS[@]}"; do
+              wait "$PID" || true
+            done
+
+            SHAPE_SUCCESS=0
+            SUCCESS_OCPUS=""
+            SUCCESS_MEMORY_GBS=""
+            SUCCESS_AD=""
+            SUCCESS_INSTANCE_ID=""
+
+            for INDEX in "${!OUTPUT_FILES[@]}"; do
+              AD="${AD_NAMES[$INDEX]}"
+              CANDIDATE_LOG=$(cat "${OUTPUT_FILES[$INDEX]}" 2>/dev/null || true)
+              OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== ${OCPUS}C-${MEMORY_GBS}G $AD ====="$'\n'"${CANDIDATE_LOG}"
+              echo "===== ${OCPUS}C-${MEMORY_GBS}G $AD ====="
+              echo "$CANDIDATE_LOG"
+
+              if [ "$SHAPE_SUCCESS" -eq 0 ] && [ -f "${RESULT_FILES[$INDEX]}" ] && grep -q '^status=success$' "${RESULT_FILES[$INDEX]}"; then
+                SHAPE_SUCCESS=1
+                SUCCESS_OCPUS=$(awk -F= '/^ocpus=/{print $2}' "${RESULT_FILES[$INDEX]}")
+                SUCCESS_MEMORY_GBS=$(awk -F= '/^memory_gbs=/{print $2}' "${RESULT_FILES[$INDEX]}")
+                SUCCESS_AD=$(awk -F= '/^availability_domain=/{print $2}' "${RESULT_FILES[$INDEX]}")
+                SUCCESS_INSTANCE_ID=$(awk -F= '/^instance_id=/{print $2}' "${RESULT_FILES[$INDEX]}")
+              fi
+            done
+
+            if [ "$SHAPE_SUCCESS" -eq 1 ]; then
+              {
+                echo "log_data<<EOF"
+                echo "$OCI_OUTPUT"
+                echo "EOF"
+                echo "ocpus=$SUCCESS_OCPUS"
+                echo "memory_gbs=$SUCCESS_MEMORY_GBS"
+                echo "availability_domain=$SUCCESS_AD"
+                echo "instance_id=$SUCCESS_INSTANCE_ID"
+              } >> "$GITHUB_OUTPUT"
+              echo "Success! Instance ${SUCCESS_INSTANCE_ID:-unknown} is PROVISIONING."
+              exit 0
+            fi
           done
 
           {
