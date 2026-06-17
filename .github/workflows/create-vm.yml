@@ -80,6 +80,14 @@ jobs:
           fi
           echo "Availability domains to try: ${AD_NAMES[*]}"
 
+          SHAPE_CONFIGS_SECRET="${{ secrets.SHAPE_CONFIGS }}"
+          if [ -z "$SHAPE_CONFIGS_SECRET" ]; then
+            SHAPE_CONFIGS=("1:6" "2:12" "4:24")
+          else
+            IFS=',' read -r -a SHAPE_CONFIGS <<< "$SHAPE_CONFIGS_SECRET"
+          fi
+          echo "Shape configs to try: ${SHAPE_CONFIGS[*]}"
+
           IMAGE_ID="${{ secrets.IMAGE_ID }}"
           if [ -z "$IMAGE_ID" ]; then
             IMAGE_ID=$(oci compute image list \
@@ -93,8 +101,8 @@ jobs:
               --raw-output)
           fi
 
-          if [ "${#AD_NAMES[@]}" -eq 0 ] || [ -z "$IMAGE_ID" ]; then
-            echo "Could not resolve AD_NAME(s) or IMAGE_ID."
+          if [ "${#AD_NAMES[@]}" -eq 0 ] || [ "${#SHAPE_CONFIGS[@]}" -eq 0 ] || [ -z "$IMAGE_ID" ]; then
+            echo "Could not resolve AD_NAME(s), SHAPE_CONFIGS, or IMAGE_ID."
             exit 1
           fi
 
@@ -114,44 +122,56 @@ jobs:
           fi
 
           OCI_OUTPUT=""
-          for AD in "${AD_NAMES[@]}"; do
-            echo "Trying availability domain: $AD"
-            for LAUNCH_ATTEMPT in 1 2 3; do
-              echo "Launch attempt $LAUNCH_ATTEMPT for $AD"
-              ATTEMPT_OUTPUT=$(timeout 300s oci compute instance launch \
-                --compartment-id "$COMPARTMENT_ID" \
-                --availability-domain "$AD" \
-                --shape "VM.Standard.A1.Flex" \
-                --shape-config '{"ocpus":1,"memoryInGBs":6}' \
-                --subnet-id "$SUBNET_ID" \
-                --image-id "$IMAGE_ID" \
-                --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
-                --assign-public-ip true \
-                --display-name "plane-vm" \
-                --boot-volume-size-in-gbs 100 2>&1 || true)
+          for SHAPE_CONFIG in "${SHAPE_CONFIGS[@]}"; do
+            IFS=':' read -r OCPUS MEMORY_GBS <<< "$SHAPE_CONFIG"
+            if [ -z "$OCPUS" ] || [ -z "$MEMORY_GBS" ]; then
+              echo "Invalid shape config: $SHAPE_CONFIG. Expected format OCPUS:MEMORY_GBS."
+              exit 1
+            fi
 
-              OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== $AD attempt $LAUNCH_ATTEMPT ====="$'\n'"${ATTEMPT_OUTPUT}"
+            echo "Trying shape config: ${OCPUS} OCPU / ${MEMORY_GBS} GB"
+            for AD in "${AD_NAMES[@]}"; do
+              echo "Trying availability domain: $AD"
+              for LAUNCH_ATTEMPT in 1 2 3; do
+                echo "Launch attempt $LAUNCH_ATTEMPT for $AD with ${OCPUS} OCPU / ${MEMORY_GBS} GB"
+                ATTEMPT_OUTPUT=$(timeout 300s oci compute instance launch \
+                  --compartment-id "$COMPARTMENT_ID" \
+                  --availability-domain "$AD" \
+                  --shape "VM.Standard.A1.Flex" \
+                  --shape-config "{\"ocpus\":${OCPUS},\"memoryInGBs\":${MEMORY_GBS}}" \
+                  --subnet-id "$SUBNET_ID" \
+                  --image-id "$IMAGE_ID" \
+                  --ssh-authorized-keys-file "/home/runner/my_ssh_key.pub" \
+                  --assign-public-ip true \
+                  --display-name "plane-vm" \
+                  --boot-volume-size-in-gbs 100 2>&1 || true)
 
-              echo "OCI launch output for $AD attempt $LAUNCH_ATTEMPT:"
-              echo "$ATTEMPT_OUTPUT"
+                OCI_OUTPUT="${OCI_OUTPUT}"$'\n'"===== ${OCPUS}C-${MEMORY_GBS}G $AD attempt $LAUNCH_ATTEMPT ====="$'\n'"${ATTEMPT_OUTPUT}"
 
-              if echo "$ATTEMPT_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
-                {
-                  echo "log_data<<EOF"
-                  echo "$OCI_OUTPUT"
-                  echo "EOF"
-                } >> "$GITHUB_OUTPUT"
-                echo "Success! 'PROVISIONING' state found in output."
-                exit 0
-              fi
+                echo "OCI launch output for $AD with ${OCPUS} OCPU / ${MEMORY_GBS} GB attempt $LAUNCH_ATTEMPT:"
+                echo "$ATTEMPT_OUTPUT"
 
-              if echo "$ATTEMPT_OUTPUT" | grep -Eiq 'RequestException|timed out|timeout|connection reset|temporarily unavailable'; then
-                echo "Transient OCI/network error detected; retrying this AD after 30 seconds."
-                sleep 30
-                continue
-              fi
+                if echo "$ATTEMPT_OUTPUT" | grep -q '"lifecycle-state": "PROVISIONING"'; then
+                  {
+                    echo "log_data<<EOF"
+                    echo "$OCI_OUTPUT"
+                    echo "EOF"
+                    echo "ocpus=$OCPUS"
+                    echo "memory_gbs=$MEMORY_GBS"
+                    echo "availability_domain=$AD"
+                  } >> "$GITHUB_OUTPUT"
+                  echo "Success! 'PROVISIONING' state found in output."
+                  exit 0
+                fi
 
-              break
+                if echo "$ATTEMPT_OUTPUT" | grep -Eiq 'RequestException|timed out|timeout|connection reset|temporarily unavailable'; then
+                  echo "Transient OCI/network error detected; retrying this AD and shape after 30 seconds."
+                  sleep 30
+                  continue
+                fi
+
+                break
+              done
             done
           done
 
@@ -183,8 +203,9 @@ jobs:
           @xuhongbo OCI A1.Flex instance created successfully.
 
           Shape: VM.Standard.A1.Flex
-          Resources: 1 OCPU, 6 GB memory, 100 GB boot volume
-          Next step: resize this A1.Flex instance to 2 OCPU and 12 GB memory after it is created.
+          Resources: ${{ steps.create_vm.outputs.ocpus }} OCPU, ${{ steps.create_vm.outputs.memory_gbs }} GB memory, 100 GB boot volume
+          Availability domain: ${{ steps.create_vm.outputs.availability_domain }}
+          Next step: verify the instance, then keep this size or resize it after migration.
           Region: ${OCI_CLI_REGION:-us-phoenix-1}
 
           Workflow run: ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
